@@ -1,0 +1,265 @@
+---
+title: "seedbox_report"
+author: "Diana Jovmir"
+date: '2018-07-15'
+output: html_document
+---
+```{r, echo=FALSE}
+folder = "~/Desktop/JOB_SEARCH/datasciencetest-master"
+
+load( paste(folder,"/sTest.Rdata", sep = ""))
+load(paste(folder,"/dTest.Rdata", sep = ""))
+load(paste(folder,"/test.Rdata", sep = ""))
+load(file = paste(folder,"/test_wide.Rdata", sep = ""))
+load(file = paste(folder,"/test_long.Rdata", sep = ""))
+load(file = paste(folder,"/test_wide0.Rdata", sep = ""))
+load(file = paste(folder,"/surv_test.Rdata", sep = ""))
+
+require(stats, quietly = TRUE, warn.conflicts = FALSE)
+require(dplyr, quietly = TRUE, warn.conflicts = FALSE)
+require(knitr, quietly = TRUE, warn.conflicts = FALSE)
+require(DT, quietly = TRUE, warn.conflicts = FALSE)
+require(xtable, quietly = TRUE, warn.conflicts = FALSE)
+require(scales, quietly = TRUE, warn.conflicts = FALSE)
+```
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+## Intro
+
+The following is the analysis of an experiment ran by Seedbox Technologies, aiming to explore the impact that 2 different modes of cancelling a subscription has on customer retention. 
+
+## Experimental Setup 
+
+The experimental sample consists of subscribers to an internet service that visited the cancelation page of the website for the first time. Subjects were then split randomly into a  "Control" and "Test Goups" following a Bernoulli sampling scheme.  
+
+The Control group could cancel their subscription using a web form while the Test group had to make a call to Customer service. Subjects were then followed for the remainder of their time as customers of the internet service and their subsequent transactions on the website were recorded in order to quantify impact of cancelling method on customer retention.
+
+The sample distribution is described in Table 1: 
+
+```{r, echo=FALSE}
+#1. what is the distribution between test and control groups? 
+
+t <- table(sTest)
+
+n <-table(sTest[,2])
+m <- apply(t,2,mean)
+se <- m[1]*m[2]/sqrt(length(sTest$sample_id))
+
+sample <- cbind(n,round(m,3),round(se,3))
+colnames(sample) <- c("n", "prop", "sd")
+kable(sample, row.names = TRUE,
+      col.names = c("n", "Proportion", "SE"),
+      caption = "Table 1: Sample Distribution")
+
+```
+
+## The Data
+
+Transactions recorded were of 3 types: CHECKBACK, REFUND and REBILL. The amount of each transaction was also recorded along with a transaction number. I assumed that transaction numbers increased in time in order to be able to define a time dimension. Since it makes sense that REBILLs would happen monthly, I took my time dimension to be measured in months since visiting the cancelation page. I also found it helpful for analysis to impute a CANCEL transaction to the data that happens in the month following the last recorded transaction with an associated amount of 0. As such, a CANCEL transaction associated with a time stamp of 2 is assumed to have happend during the second month after visiting the cancelation page. 
+
+(Note: It's unclear to me if the cancel transaction should have counted in the month previous to a REFUND or REBILL as opposed to the following one. However, the number of these transactios is low enough that it shouldn't affect the calculation of proportions of returning customers. )
+
+Table 2 shows a glance at the data set. 
+
+```{r, echo = FALSE}
+
+tl <- test_long
+colnames(tl) <- c("Sample ID", "Test Group", "Time",
+                        "Transaction Type", "Transaction Amount")
+
+datatable(tl[tl$Time == 12 &!is.na(test_long$transaction_type.1),],
+          rownames = FALSE,
+          caption = "Table 2: A look at the data")
+
+
+```
+
+
+We found that the great majority of customers had cancelled their subscription 12 months after their initial visit to the cancel page with 43 customers remaining for the up to 22 months. Most customers cancelled (95%) their subcription during their first visit at the cancel page with the remaining ones cancelling gradually over the course of the experiment.
+
+
+## Analysis 
+
+
+<!--1. What is the aproximate probability distribution between the test group and the control group-->
+
+To get an idea of the outcomes of our subject, we can take a look at the survival fit in Figure 1, with a "CANCEL" transaction being considered an event and all other transactions a non-event.
+
+```{r, echo = FALSE}
+library(survival)
+
+s_model <- summary(survfit(Surv(time, death) ~ test_group, data = surv_test))
+
+with(s_model,plot(time,surv,type="n", xlim=c(0,12),ylim=c(0,0.12),
+                  ylab = "Probability",
+                  xlab = "Time (months)",
+                  main = "Figure 1: Probability of continued subscription"))
+
+
+tc <- c(c(1:20),c(2:21))
+tc <- tc[order(tc)]
+lowc <-c(1:20, 1:20) 
+lowc <- lowc[order(lowc)]
+with(s_model,polygon(c(tc,rev(tc)),c(lower[lowc], upper[rev(lowc)]),
+                 col = alpha("blue",0.3), border = FALSE))
+with(s_model,lines(c(1,time[1:19]),c(1,surv[1:19]),type="s", col = "blue", lwd = 2))
+
+
+tt <- c(c(1:11),c(2:12))
+tt <- tt[order(tt)]
+lowt <-c(21:31, 21:31) 
+lowt <- lowt[order(lowt)]
+with(s_model,polygon(c(tt,rev(tt)),c(lower[lowt], upper[rev(lowt)]),
+                     col = alpha("red",0.3), border = FALSE))
+with(s_model,lines(c(1,time[21:31]),c(1,surv[21:31]),type="s", col = "red3", lwd =2))
+legend('topright', legend = c("Control", "Test"), 
+       lty = c(1,1), lwd = c(2,2), col = c("blue", "red3"))
+
+
+```
+
+We can clearly see that the survival rates are higher for the Test group during the first 5 months, but resemble those for the Control group after 5 months, and, as expected, a non-parametric test assuming the curves come from the same distribution gives a p-value of approximately 0. 
+
+```{r, echo = FALSE}
+surv_t <- survdiff(Surv(time, death) ~ test_group, data = surv_test)
+```
+ 
+
+#### Is a user that must call-in to cancel more likely to generate at least 1 addition REBILL?
+
+A test of equality of proportion indicates that a Test user has a significantly higher probability of subscribing to the service for at least 1 more month than a Control subjects. The results can be seen in Table 3.
+
+```{r, echo = FALSE}
+rebill1_c <- sum(test_wide0$transaction_type.1 =="REBILL" & test_wide0$test_group =="Ctrl")
+
+rebill1_t <-sum(test_wide0$transaction_type.1 =="REBILL" & test_wide0$test_group =="Test")
+
+sc<- length(sTest[sTest$test_group=="Ctrl",1])
+st<- length(sTest[sTest$test_group=="Test",1])
+
+rebills <- prop.test(matrix(c(rebill1_c,rebill1_t,sc-rebill1_c,st-rebill1_t ),2),alternative ="less")
+
+rb <- data.frame(round(rebills$estimate,3),rebills$p.value)
+colnames(rb) <- c("Estimate", "p-value")
+rownames(rb) <- c("Control", "Test")
+
+kable(rb, caption = "Table 3: Test of Equality of Proportion of Continued Subscribers After 1 month. H0: Test < Control")
+```
+
+
+
+#### Is a user that must call-in to cancel more likely to generate more revenues?
+
+The distribution of average spending per customer differs greatly when we consider all test subjects, as opposed to only those that didn't cancel in the first month. Let's take a look at Figure 2 to compare the 2 scenarios.
+```{r, echo = FALSE}
+
+money<- data.frame(test_wide0$sample_id, test_wide0$test_group,apply(test_wide0[,paste("transaction_amount.",1:22,sep="")],1,sum))
+
+colnames(money) <- c("sample_id", "group", "total_amount")
+
+par(mfrow = c(2,2))
+
+h_ctrl <-money$total_amount[money$group=="Ctrl" ]
+hc <- hist(h_ctrl, breaks = c(-3:6)*100, plot = FALSE)
+hc$counts <- hc$counts/length(money$total_amount[money$group=="Ctrl"])
+plot(hc, ylim = c(0,1), xlab = "Total Amount Spent by Customer",
+     ylab = "Proportion of All Subjects", 
+     main = "Control ")
+#shapiro.test(money$total_amount[money$group=="Ctrl"& money$total_amount!= 0 ])
+h_test <- money$total_amount[money$group=="Test"]
+ht <- hist(h_test, breaks = c(-3:6)*100, plot = FALSE)
+ht$counts <- ht$counts/length(money$total_amount[money$group=="Test"])
+plot(ht, ylim = c(0,1), xlab = "Total Amount Spent by Customer",
+     ylab = "Proportion of All Subjects", 
+     main = "Test")
+
+h_ctrl <-money$total_amount[money$group=="Ctrl" & money$total_amount!= 0]
+hc <- hist(h_ctrl, breaks = c(-3:6)*100, plot = FALSE)
+hc$counts <- hc$counts/length(money$total_amount[money$group=="Ctrl" & money$total_amount!= 0])
+plot(hc, ylim = c(0,0.8), xlab = "Total Amount Spent by Customer",
+     ylab = "Proportion of Continued Customers", 
+     main = "Control ")
+#shapiro.test(money$total_amount[money$group=="Ctrl"& money$total_amount!= 0 ])
+h_test <- money$total_amount[money$group=="Test" & money$total_amount!= 0]
+ht <- hist(h_test, breaks = c(-3:6)*100, plot = FALSE)
+ht$counts <- ht$counts/length(money$total_amount[money$group=="Test" & money$total_amount!= 0])
+plot(ht, ylim = c(0,0.8), xlab = "Total Amount Spent by Customer",
+     ylab = "Proportion of Continued Customers", 
+     main = "Test")
+#shapiro.test(money$total_amount[money$group=="Test"& money$total_amount!= 0 ])
+
+
+
+```
+
+While the average amount billed per customer doesn't follow a normal distribution, we have a large enough sample to make do with a two sample t-test to find out how the distribution of means differ. We can see in Table 4 that Test subjects have a significantly higher spending overall but not when considering only those users that didn't cancel their subscriptions during the first month.
+
+
+```{r, echo = FALSE}
+
+money_all <- t.test(total_amount~group, data = money, alternative = "less")
+
+money_some <- t.test(total_amount~group, data = money[money$total_amount!= 0,], alternative = "less")
+
+mn <- data.frame(round(money_all$estimate,2), round(money_some$estimate,2))
+mn2 <- rbind(mn,round(c(money_all$p.value, money_some$p.value),3))
+
+colnames(mn2) <- c("Mean-all", "Mean-subscribers")
+rownames(mn2) <- c("Control", "Test", "p-values")
+#mn2
+
+kable(mn2, caption = "Table 4: t.test of Equality of Mean Spending of Continued Subscribers and All Test Subjects. H0: Test < Control")
+```
+
+
+#### Is a user that must call-in more likely to produce a higher chargeback rate(CHARGEBACKs/REBILLs)?
+
+In fact, users in the Test group appear to have a lower chargeback rate than those in the control group. 
+
+(NOTE: I don't really understand if chargebacks are supposed to include refunds. I' haven't included them at this point've decided not to include them.)
+
+```{r, echo = FALSE}
+#higher changeback rate??
+
+#chargebacks
+rcc <- sum(test$transaction_type =="CBACK" & test$test_group =="Ctrl")
+rct <- sum(test$transaction_type =="CBACK" & test$test_group =="Test")
+rb_c <- length(test[test$transaction_type =="REBILL" & test$test_group =="Ctrl",1])#/length(sTest[sTest$test_group=="Ctrl",1])
+rb_t <- length(test[test$transaction_type =="REBILL" & test$test_group =="Test",1])#/length(sTest[sTest$test_group=="Test",1])
+
+cbacks <- prop.test(matrix(c(rct,rcc,rb_t-rct, rb_c-rcc),2), alternative ="greater")
+
+cb <- data.frame(round(cbacks$estimate,3),round(cbacks$p.value,3))
+colnames(cb) <- c("Estimate", "p-value")
+rownames(cb) <- c("Test", "Control")
+
+kable(cb, caption = "Table 5: Test of Equality of Proportion of Chargeback Rates; H0: Control > Test")
+
+#refunds
+#rc <- sum(test$transaction_type =="REFUND" & test$test_group #=="Ctrl")#/length(sTest[sTest$test_group=="Ctrl",1])
+#rt <-sum(test$transaction_type =="REFUND" & test$test_group #=="Test")#/length(sTest[sTest$test_group=="Test",1])
+
+
+#prop.test(matrix(c(rc,rt,rb_c-rc,rb_t-rt),2),alternative ="greater")
+
+
+
+```
+
+## Discussion
+
+It seems clear from the above analysis that customers that must call in to cancel their subscription remain subscribed for longer than customers that can do so via a webform. They also generate more revenue on average, but that difference is mostly due to the initial delay in cancelling. Surprisingly, they also seem to generate a lower chargeback rate than the subjects in the control group. 
+
+However, we must be careful before deciding that it's more profitable overall to force people to call in to cancel their subscriptions. We haven't yet considered that former customers are also able to re-subscibe to a service. People that are un-motivated to stay might also be uncommited about quitting; however, having had a more difficult experience quitting the first time, subjects in the Test group might be reluctant to resubscribe. Data on return customers might be more difficult to gather, but it would be important to consider. 
+
+
+
+
+
